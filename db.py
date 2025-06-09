@@ -11,16 +11,35 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             gift_count INTEGER DEFAULT 1,
             max_price INTEGER DEFAULT 100,
+            min_price INTEGER DEFAULT 50,
             released_thousands INTEGER DEFAULT 10,
+            min_released_thousands INTEGER DEFAULT 1,
             stars INTEGER DEFAULT 0,
             want_to_buy INTEGER DEFAULT 0,
             auto_buy INTEGER DEFAULT 0,
             auto_buy_new_gifts INTEGER DEFAULT 0,
             max_stars_per_gift INTEGER DEFAULT 50,
+            auto_buy_cycles INTEGER DEFAULT 1,
             notification_enabled INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    
+    # Добавляем новые колонки если их нет (для обновления существующих БД)
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN min_price INTEGER DEFAULT 50')
+    except sqlite3.OperationalError:
+        pass  # Колонка уже существует
+    
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN auto_buy_cycles INTEGER DEFAULT 1')
+    except sqlite3.OperationalError:
+        pass  # Колонка уже существует
+    
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN min_released_thousands INTEGER DEFAULT 1')
+    except sqlite3.OperationalError:
+        pass  # Колонка уже существует
     
     # Таблица истории покупок
     c.execute('''
@@ -73,6 +92,23 @@ def init_db():
         )
     ''')
     
+    # Таблица для звездных чеков
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS star_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            check_id TEXT UNIQUE,
+            from_user_id INTEGER,
+            to_user_id INTEGER,
+            to_username TEXT,
+            amount INTEGER,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            claimed_at TIMESTAMP,
+            message TEXT,
+            FOREIGN KEY (from_user_id) REFERENCES users (user_id)
+        )
+    ''')
+    
     # Индексы для оптимизации
     c.execute('CREATE INDEX IF NOT EXISTS idx_gifts_price ON available_gifts(price_stars)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_gifts_source ON available_gifts(source)')
@@ -97,8 +133,8 @@ def get_user_settings(user_id):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     c.execute('''
-        SELECT gift_count, max_price, released_thousands, stars, auto_buy, 
-               auto_buy_new_gifts, max_stars_per_gift, notification_enabled
+        SELECT gift_count, max_price, min_price, released_thousands, min_released_thousands, stars, auto_buy, 
+               auto_buy_new_gifts, max_stars_per_gift, auto_buy_cycles, notification_enabled
         FROM users WHERE user_id=?
     ''', (user_id,))
     row = c.fetchone()
@@ -107,12 +143,15 @@ def get_user_settings(user_id):
         return {
             'gift_count': row[0], 
             'max_price': row[1], 
-            'released_thousands': row[2],
-            'stars': row[3],
-            'auto_buy': row[4],
-            'auto_buy_new_gifts': row[5],
-            'max_stars_per_gift': row[6],
-            'notification_enabled': row[7]
+            'min_price': row[2],
+            'released_thousands': row[3],
+            'min_released_thousands': row[4],
+            'stars': row[5],
+            'auto_buy': row[6],
+            'auto_buy_new_gifts': row[7],
+            'max_stars_per_gift': row[8],
+            'auto_buy_cycles': row[9],
+            'notification_enabled': row[10]
         }
     else:
         return None
@@ -128,15 +167,26 @@ def add_stars(user_id, amount):
     conn.close()
     return total_stars
 
-def get_suitable_gifts(max_price_rubles, max_released):
+def get_suitable_gifts(user_id):
+    """Получает подходящие подарки на основе настроек пользователя"""
+    user_settings = get_user_settings(user_id)
+    if not user_settings:
+        return []
+    
+    min_price = user_settings.get('min_price', 15)
+    max_price = user_settings.get('max_price', 100)
+    max_supply = user_settings.get('released_thousands', 50) * 1000  # Переводим в штуки
+    
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     c.execute('''
-        SELECT name, price_stars, price_rubles, total_released, emoji, telegram_id
+        SELECT name, price_stars, total_released, emoji
         FROM available_gifts 
-        WHERE price_rubles <= ? AND total_released <= ? AND is_active = 1
-        ORDER BY price_rubles DESC
-    ''', (max_price_rubles, max_released))
+        WHERE price_stars BETWEEN ? AND ? 
+        AND total_released <= ? 
+        AND is_active = 1
+        ORDER BY price_stars ASC
+    ''', (min_price, max_price, max_supply))
     gifts = c.fetchall()
     conn.close()
     return gifts
@@ -236,3 +286,95 @@ def get_purchase_stats(user_id, limit=10):
     
     conn.close()
     return history, stats
+
+def create_star_check(from_user_id, amount, to_username=None, message=None):
+    """Создает звездный чек"""
+    import uuid
+    check_id = str(uuid.uuid4())[:8]  # Короткий ID чека
+    
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    
+    # Проверяем баланс отправителя
+    c.execute('SELECT stars FROM users WHERE user_id = ?', (from_user_id,))
+    result = c.fetchone()
+    if not result or result[0] < amount:
+        conn.close()
+        return None, "Недостаточно звезд"
+    
+    # Списываем звезды с баланса отправителя
+    c.execute('UPDATE users SET stars = stars - ? WHERE user_id = ?', (amount, from_user_id))
+    
+    # Создаем чек
+    c.execute('''
+        INSERT INTO star_checks (check_id, from_user_id, to_username, amount, message)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (check_id, from_user_id, to_username, amount, message))
+    
+    conn.commit()
+    conn.close()
+    return check_id, "success"
+
+def claim_star_check(check_id, claimer_user_id):
+    """Активирует чек и переводит звезды получателю"""
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    
+    # Находим чек
+    c.execute('SELECT * FROM star_checks WHERE check_id = ? AND status = "pending"', (check_id,))
+    check = c.fetchone()
+    
+    if not check:
+        conn.close()
+        return False, "Чек не найден или уже активирован"
+    
+    check_data = {
+        'id': check[0], 'check_id': check[1], 'from_user_id': check[2],
+        'to_user_id': check[3], 'to_username': check[4], 'amount': check[5],
+        'status': check[6], 'created_at': check[7], 'claimed_at': check[8], 'message': check[9]
+    }
+    
+    # Если чек для конкретного пользователя - проверяем
+    if check_data['to_username']:
+        # Здесь нужно получить username пользователя и сравнить
+        pass  # Пока пропускаем эту проверку
+    
+    # Добавляем звезды получателю
+    c.execute('INSERT OR IGNORE INTO users(user_id, stars) VALUES (?, 0)', (claimer_user_id,))
+    c.execute('UPDATE users SET stars = stars + ? WHERE user_id = ?', (check_data['amount'], claimer_user_id))
+    
+    # Помечаем чек как активированный
+    c.execute('UPDATE star_checks SET status = "claimed", to_user_id = ?, claimed_at = CURRENT_TIMESTAMP WHERE check_id = ?', 
+              (claimer_user_id, check_id))
+    
+    conn.commit()
+    conn.close()
+    return True, check_data
+
+def get_user_checks(user_id, limit=10):
+    """Получает чеки пользователя"""
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    
+    # Отправленные чеки
+    c.execute('''
+        SELECT check_id, amount, to_username, status, created_at, claimed_at, message
+        FROM star_checks 
+        WHERE from_user_id = ? 
+        ORDER BY created_at DESC 
+        LIMIT ?
+    ''', (user_id, limit))
+    sent_checks = c.fetchall()
+    
+    # Полученные чеки
+    c.execute('''
+        SELECT check_id, amount, status, created_at, claimed_at, message
+        FROM star_checks 
+        WHERE to_user_id = ? 
+        ORDER BY claimed_at DESC 
+        LIMIT ?
+    ''', (user_id, limit))
+    received_checks = c.fetchall()
+    
+    conn.close()
+    return sent_checks, received_checks
