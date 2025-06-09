@@ -1,2 +1,5 @@
 python-telegram-bot==20.3
 telethon==1.33.1
+cryptg
+aiohttp
+requests
