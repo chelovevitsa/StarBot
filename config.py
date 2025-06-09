@@ -1,12 +1,13 @@
 # Конфигурация для StarBot автопокупки подарков
+import os
 
 # Telegram Bot API
-BOT_TOKEN = "8183658865:AAHQjtIJWA8d_yk7cPceKFZ2f8x1riijxH0"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8183658865:AAHQjtIJWA8d_yk7cPceKFZ2f8x1riijxH0")
 
 # Telegram Client API (для userbot)
-API_ID = 23355959
-API_HASH = 'b1f4e47d212838b44762a1c3b04fe37f'
-PHONE = '+48795405315'
+API_ID = int(os.getenv("API_ID", 23355959))
+API_HASH = os.getenv("API_HASH", 'b1f4e47d212838b44762a1c3b04fe37f')
+PHONE = os.getenv("PHONE", '+48795405315')
 
 # Настройки мониторинга
 MONITOR_INTERVAL = 30  # секунд между проверками новых подарков

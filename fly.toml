@@ -8,16 +8,14 @@ primary_region = 'fra'
 
 [build]
 
-[http_service]
-  internal_port = 8080
-  force_https = true
-  auto_stop_machines = 'stop'
-  auto_start_machines = true
-  min_machines_running = 1
-  processes = ['app']
+# Настройки для предотвращения автоматического выключения
+[deploy]
+  strategy = "immediate"
 
 [[vm]]
   memory = '1gb'
   cpu_kind = 'shared'
   cpus = 1
-  memory_mb = 1024
+  kill_signal = "SIGTERM"
+  kill_timeout = "30s"
+  restart_policy = "always"
