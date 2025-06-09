@@ -1,2 +1,5 @@
 [build]
   image = "python:3.11-slim"
+
+[http_service]
+min_machines_running = 1
